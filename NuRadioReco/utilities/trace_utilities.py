@@ -854,3 +854,91 @@ def get_variable_window_size_correlation(data_trace, template_trace, window_size
         return correlation, time_diff
     else:
         return correlation
+
+
+def get_channel_fluence(
+        channel_trace, times, signal_window_mask=None, noise_window_mask=None,
+        return_uncertainty=False, method="noise_subtraction", estimator_kwargs={}):
+    """
+    Returns the pseudofluence of a single channel-level trace.
+
+    The code is basically similar to the get_energy_fluence, but is applied only to a 
+    single channel trace. This means its agnostic to the polarisation it is applied on.
+
+    Users who use this function need care to know the polarisation of each channel.
+
+    NOTE: currently the rice method is not implemented for the channel fluence. It will be in the future.
+
+    Parameters
+    ----------
+    channel_trace : numpy.ndarray
+        The channel trace to calculate the energy fluence for
+    times : numpy.ndarray
+        The time grid for the channel trace
+    signal_window_mask : numpy.ndarray (optional)
+        A boolean mask that selects the signal window in which the energy fluence is calculated
+    noise_window_mask : numpy.ndarray (optional)
+        A boolean mask that selects the noise window. Only used if method is "noise_subtraction"
+    return_uncertainty : bool (optional)
+        If True, the uncertainty of the energy fluence is returned
+    method : str (optional)
+        The method to use for the fluence calculation.
+        Can be either "noise_subtraction" or "rice".
+        The Rice distribution method implementation is based on the code published by S. Martinelli et al.: https://arxiv.org/abs/2407.18654
+
+    Returns
+    -------
+    signal_fluence : numpy.ndarray
+        The fluence of each component of the electric field trace
+    signal_fluence_error : numpy.ndarray
+        The uncertainty of the fluences. Only returned if return_uncertainty is True
+
+    Other Parameters
+    ----------------
+    estimator_kwargs : dict (optional)
+        Additional keyword arguments passed to ``_get_noise_fluence_estimators`` and ``_get_signal_fluence_estimators`` functions.
+        Only used if method is "rice".
+
+    """
+
+    dt = times[1] - times[0]
+
+    if method == "noise_subtraction":
+        if signal_window_mask is None:
+            f_signal = np.sum(channel_trace ** 2, axis=1)
+        else:
+            f_signal = np.sum(channel_trace[signal_window_mask] ** 2)
+
+        if noise_window_mask is not None and np.sum(noise_window_mask) > 0:
+            f_noise = np.sum(channel_trace[noise_window_mask] ** 2)
+            f_signal -= f_noise * np.sum(signal_window_mask) / np.sum(noise_window_mask)
+            f_signal = 0 if f_signal < 0 else f_signal
+
+            # calculate RMS noise for error estimation
+            RMSNoise = np.sqrt(np.mean(channel_trace[ noise_window_mask] ** 2))
+        else:
+            RMSNoise = None
+
+        signal_fluence = f_signal * dt * conversion_factor_integrated_signal
+
+        # calculate error if RMSNoise is known:
+        if RMSNoise is not None and return_uncertainty:
+            signal_window_duration = sum(signal_window_mask) * dt if signal_window_mask is not None else len(times) * dt
+            signal_fluence_error = (4 * np.abs(signal_fluence / conversion_factor_integrated_signal) * RMSNoise ** 2 * dt + 2 * signal_window_duration * RMSNoise ** 4 * dt) ** 0.5  * conversion_factor_integrated_signal
+
+            # usually an adhoc term is added to the uncertainty to ensure a large enough uncertainty.
+            # this basically scales with the RMSNoise
+            adhoc_term = RMSNoise * np.sum(signal_window_mask) / np.sum(noise_window_mask) * dt * conversion_factor_integrated_signal
+            signal_fluence_error = np.sqrt(signal_fluence_error**2 + adhoc_term**2)
+        else:
+            signal_fluence_error = np.zeros(3)
+
+    elif method.lower() == "rice":
+        raise NotImplementedError(f"rice method is not implemented for channel-level traces, valid options are 'noise_subtraction'.")
+    else:
+        raise NotImplementedError(f"method '{method}' is not implemented, valid options are 'noise_subtraction' or 'rice'.")
+
+    if return_uncertainty:
+        return signal_fluence, signal_fluence_error
+    else:
+        return signal_fluence

@@ -53,7 +53,7 @@ download_from_dataserver(
 event_id = 92380604
 
 pipeline_path = Path("./test-data/pipeline")
-atmosphere_dir = Path("./test-data/pipeline/atmosphere")
+atmosphere_dir = Path("./test-data/pipeline/gdas_cache")
 download_from_dataserver(
     remote_path=f"lofar_share/pipeline-results-{event_id}.tar.gz",
     target_path=str(pipeline_path / f"pipeline-results-{event_id}.tar.gz"),
@@ -69,7 +69,7 @@ pipeline_args.block_number_file = block_number_file
 pipeline_args.output_dir = str(output_path)
 pipeline_args.output_nur = None # do NOT save for the test, as we want to compare the results with the pre-saved ones
 pipeline_args.atmosphere_dir = atmosphere_dir
-pipeline_args.gdas_cache_dir = str(output_path / "gdas_cache")
+pipeline_args.gdas_cache_dir = atmosphere_dir
 pipeline_args.ift_iterations = 2        # increase for more refined reconstruction
 pipeline_args.ift_samples = 40          # increase for more refined reconstruction
 pipeline_args.enable_fluence_correlated_field = False       # disabled for demonstration, setting to True might increase runtime and memory usage 

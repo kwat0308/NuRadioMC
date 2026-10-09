@@ -30,6 +30,7 @@ RFI_CLEANING_TRACE_LENGTH = 8192
 # construction, so any noise estimate must skip it; iftDataHelpers reads this
 # constant 
 BANDPASS_HALF_HANN_PERCENT = 0.1
+BANDPASS_GAUSSIAN_ROLL_WIDTH = 2.5 # in MHz, used for the Gaussian roll-off of the bandpass filter
 CR_SNR = 6.5
 PASS_BAND = (30, 80)
 START_TIME = datetime.datetime(2012, 10, 1, 0, 0)

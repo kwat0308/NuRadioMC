@@ -37,7 +37,7 @@ from NuRadioReco.modules.LOFAR.reconstruction.iftReconstructor import (  # noqa:
 from NuRadioReco.utilities.LOFAR.iftDataHelpers import MAX_SIGNAL_SNR_THRESHOLD  # noqa: E402
 from NuRadioReco.utilities.LOFAR.constants import (  # noqa: E402
     BLOCK_NUMBER_FILE, GDAS_ATMOSPHERE_DIRECTORY, JSON_DIRECTORY,
-    META_DATA_DIRECTORY, TBB_DIRECTORY,
+    META_DATA_DIRECTORY, TBB_DIRECTORY, 
 )
 from NuRadioReco.utilities import units  # noqa: E402
 

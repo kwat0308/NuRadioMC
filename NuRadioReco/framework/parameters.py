@@ -80,6 +80,7 @@ class channelParameters(Enum):
     impulsivity = 23  #: average of the CDF about the peak of the coherently summed waveform
     entropy = 24  #: Shannon entropy of a waveform
     kurtosis = 25  #: kurtosis of a waveform
+    signal_fluence = 26 #: the channel-level signal fluence, after removing the noise.
 
 class channelParametersRNOG(Enum):
     # RNO-G specific channel parameters

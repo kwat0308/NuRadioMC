@@ -25,6 +25,7 @@ from NuRadioReco.utilities.LOFAR import (
     DATA_TRACE_LENGTH,
     RFI_CLEANING_TRACE_LENGTH,
     BANDPASS_HALF_HANN_PERCENT,
+    BANDPASS_GAUSSIAN_ROLL_WIDTH,
     CR_SNR,
     PASS_BAND,
 )  # noqa: E402
@@ -199,7 +200,7 @@ class dataEventGenerator:
                     self.detector,
                     passband=[PASS_BAND[0] * units.MHz, PASS_BAND[1] * units.MHz],
                     filter_type="gaussian_tapered",
-                    roll_width=2.5 * units.MHz,
+                    roll_width=BANDPASS_GAUSSIAN_ROLL_WIDTH * units.MHz,
                 )
                 self.bandpass_filter.run(
                     event,

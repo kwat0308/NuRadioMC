@@ -41,7 +41,7 @@ class efieldToVoltageConverter():
 
     def begin(self, debug=False, uncertainty=None, time_resolution=None,
               pre_pulse_time=200 * units.ns, post_pulse_time=400 * units.ns,
-              caching=True
+              caching=True, skip_trace_padding=False
               ):
         """
         Begin method, sets general parameters of module
@@ -68,6 +68,9 @@ class efieldToVoltageConverter():
             length of empty samples that is added after the simulated trace
         caching: bool
             enable/disable caching of antenna response to save loading times (default: True)
+        skip_trace_padding: bool
+            if True, the module will not pad the traces to the maximum length of all channels.
+            This is useful if one only cares about applying the antenna response, and not about having all traces in a station to have the same length. (default: False)
         """
 
         if time_resolution is not None:
@@ -91,6 +94,8 @@ class efieldToVoltageConverter():
 
         self.__antenna_provider = antennapattern.AntennaPatternProvider()
 
+        self.__skip_trace_padding = skip_trace_padding
+
     @property
     def antenna_provider(self):
         logger.warning("Deprecation warning: `antenna_provider` is deprecated.")
@@ -106,22 +111,36 @@ class efieldToVoltageConverter():
         """
         return ant_pattern.get_antenna_response_vectorized(self.__freqs, zen, azi, *ant_orient)
 
+    def _match_trace_lengths(self, station, det, channel_ids):
+        """
+        Set the trace length for all channels in the station. The trace length is set to the maximum
+        trace length of all channels. This is necessary to ensure that all channels have the same
+        trace length.
 
-    @register_run()
-    def run(self, evt, station, det, channel_ids=None):
-        t = time.time()
+        Parameters
+        ----------
+        station: Station
+            Station object
+        det: Detector
+            Detector object
+        channel_ids: list of int
+            List of channel ids to be processed
 
-        # access simulated efield and high level parameters
-        sim_station = station.get_sim_station()
-        sim_station_id = sim_station.get_id()
-        if len(sim_station.get_electric_fields()) == 0:
-            raise LookupError(f"station {station.get_id()} has no efields")
-
+        Returns
+        -------
+        trace_length_samples: int
+            Trace length in samples
+        times_min: float
+            Minimum time of the traces in ns
+        time_resolution: float
+            Time resolution of the traces in ns
+        """
         # first we determine the trace start time of all channels and correct
         times_min = []
         times_max = []
-        if channel_ids is None:
-            channel_ids = det.get_channel_ids(sim_station_id)
+
+        sim_station = station.get_sim_station()
+        sim_station_id = sim_station.get_id()
 
         for channel_id in channel_ids:
 
@@ -172,6 +191,33 @@ class efieldToVoltageConverter():
             "smallest trace start time {:.1f}, largest trace time {:.1f} -> n_samples = {:d} {:.0f}ns)".format(
                 times_min, times_max, trace_length_samples, trace_length / units.ns))
         
+        
+        return trace_length_samples, times_min, time_resolution
+
+
+    @register_run()
+    def run(self, evt, station, det, channel_ids=None):
+        t = time.time()
+
+        # access simulated efield and high level parameters
+        sim_station = station.get_sim_station()
+        sim_station_id = sim_station.get_id()
+        if len(sim_station.get_electric_fields()) == 0:
+            raise LookupError(f"station {station.get_id()} has no efields")
+
+        if channel_ids is None:
+            channel_ids = det.get_channel_ids(sim_station_id)
+        
+        if not self.__skip_trace_padding:
+            trace_length_samples, times_min, time_resolution = self._match_trace_lengths(station, det, channel_ids)
+
+        else:
+            # assumes that all electric fields have the same sampling rate
+            time_resolution = 1. / sim_station.get_electric_fields_for_channels([channel_ids[0]]).get_sampling_rate()
+            times_min = 0
+            trace_length_samples = None
+        
+        
         # loop over all channels
         for channel_id in channel_ids:
 
@@ -203,6 +249,9 @@ class efieldToVoltageConverter():
                 # in a measurement, all channels have the same physical start time
                 # so we need to create one long trace that can hold all the different channel times
                 # to achieve a good time resolution, we upsample the trace first.
+                if trace_length_samples is None:
+                    trace_length_samples = int(round(electric_field.get_trace().shape[-1]))
+
                 new_trace = np.zeros((3, trace_length_samples))
 
 

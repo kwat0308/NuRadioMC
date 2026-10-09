@@ -66,6 +66,40 @@ class channelSignalReconstructor:
         self.__coincidence_window_size = coincidence_window_size
         self.__debug = debug
 
+    def get_signal_noise_windows(self, trace, times, sampling_rate):
+        """
+        Return the signal and noise windows, used to calculate basic channel properties
+
+        Parameters
+        ----------
+        trace : np.ndarray
+            the channel trace
+        times : np.ndarray
+            the time array
+
+        Returns
+        -------
+        signal_window_mask : np.ndarray
+            mask of the signal window
+        noise_window_mask : np.ndarray
+            mask of the noise window
+        noise_window_length : np.ndarray
+            length of the noise window
+        """
+        if self.__signal_window_start is not None:
+            signal_window_start = self.__signal_window_start
+            signal_window_mask = (times > self.__signal_window_start) & (times < self.__signal_window_start + self.__signal_window_length)
+        else:
+            signal_window_start = times[np.argmax(np.abs(trace))] - .5 * self.__signal_window_length
+            signal_window_mask = (times > signal_window_start) & (times < signal_window_start + self.__signal_window_length)
+        if self.__noise_window_start is not None and self.__noise_window_length is not None:
+            noise_window_mask = (times > self.__noise_window_start) & (times < self.__noise_window_start + self.__noise_window_length)
+            noise_window_length = self.__noise_window_length
+        else:
+            noise_window_mask = ~signal_window_mask
+            noise_window_length = len(trace[noise_window_mask]) / sampling_rate
+        return signal_window_mask, noise_window_mask, noise_window_length
+
     def get_SNR(self, station_id, channel, det, stored_noise = False, rms_stage = None):
         """
         Parameters
@@ -90,18 +124,7 @@ class channelSignalReconstructor:
         trace = channel.get_trace()
         times = channel.get_times() - channel.get_trace_start_time()
 
-        if self.__signal_window_start is not None:
-            signal_window_start = self.__signal_window_start
-            signal_window_mask = (times > self.__signal_window_start) & (times < self.__signal_window_start + self.__signal_window_length)
-        else:
-            signal_window_start = times[np.argmax(np.abs(trace))] - .5 * self.__signal_window_length
-            signal_window_mask = (times > signal_window_start) & (times < signal_window_start + self.__signal_window_length)
-        if self.__noise_window_start is not None and self.__noise_window_length is not None:
-            noise_window_mask = (times > self.__noise_window_start) & (times < self.__noise_window_start + self.__noise_window_length)
-            noise_window_length = self.__noise_window_length
-        else:
-            noise_window_mask = ~signal_window_mask
-            noise_window_length = len(trace[noise_window_mask]) / channel.get_sampling_rate()
+        signal_window_mask, noise_window_mask, noise_window_length = self.get_signal_noise_windows(trace, times, channel.get_sampling_rate())
 
         # Various definitions
         noise_int = np.sum(np.square(trace[noise_window_mask]))
@@ -200,6 +223,32 @@ class channelSignalReconstructor:
 
         return maxaval
 
+    def get_channel_fluence(self, channel):
+        """
+        Compute the channel-level fluence and store it into the channelParameter.
+
+        Note that this does not calculate with the polarization of the traces.
+
+        Parameters
+        ----------
+        channel : Channel
+            the channel object to calculate fluence on
+        """
+        trace = channel.get_trace()
+        times = channel.get_times()
+
+        signal_window_mask, noise_window_mask, noise_window_length = self.get_signal_noise_windows(trace, times, channel.get_sampling_rate())
+        
+        channel_fluence, channel_fluence_error = trace_utilities.get_channel_fluence(
+            trace,
+            times,
+            signal_window_mask=signal_window_mask,
+            noise_window_mask=noise_window_mask,
+            return_uncertainty=True
+        )
+        channel.set_parameter(chp.signal_fluence, channel_fluence)
+        channel.set_parameter_error(chp.signal_fluence, channel_fluence_error) 
+
 
     @register_run()
     def run(self, evt, station, det, stored_noise = False, rms_stage = 'amp', snr_only=False):
@@ -256,6 +305,8 @@ class channelSignalReconstructor:
                 channel[chp.root_power_ratio] = trace_utilities.get_root_power_ratio(trace, times, noise_rms)
                 channel[chp.entropy] = trace_utilities.get_entropy(trace)
                 channel[chp.kurtosis] = trace_utilities.get_kurtosis(trace)
+
+            self.get_channel_fluence(channel)
 
         station[stnp.channels_max_amplitude] = max_amplitude_station
         station[stnp.channels_max_amplitude_norm] = self.get_max_a_norm(station)

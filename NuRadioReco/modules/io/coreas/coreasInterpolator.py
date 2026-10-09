@@ -60,7 +60,7 @@ class coreasInterpolator:
     the trace start times to also be interpolated (this is done in this implementation).
     """
 
-    def __init__(self, corsika_evt):
+    def __init__(self, corsika_evt, log_level=logging.NOTSET):
         # These are set by self.initialize_star_shape()
         self.sampling_rate = None
         self.electric_field_on_sky = None
@@ -85,10 +85,13 @@ class coreasInterpolator:
         self.interp_highfreq = None
         self.efield_interpolator = None
         self.fluence_interpolator = None
+        
+        self.logger = logger
+        self.logger.setLevel(log_level)
 
         self.initialize_star_shape()
 
-        logger.info(
+        self.logger.info(
             f'Initialised star shape pattern for interpolation. '
             f'The shower arrives from zenith={self.zenith / units.deg:.1f}deg, '
             f'azimuth={self.azimuth / units.deg:.1f}deg '
@@ -102,7 +105,7 @@ class coreasInterpolator:
         in the shower plane and the electric field.
         """
         if not np.all(self.shower.get_parameter(shp.core)[:2] == 0):
-            logger.status(
+            self.logger.status(
                 "The shower core is not at the origin. "
                 "Be careful to adjust antenna positions accordingly when retrieving interpolated values."
             )
@@ -148,7 +151,7 @@ class coreasInterpolator:
         returns the maximal radius of the star shape pattern in the shower plane
         """
         if not self.star_shape_initialized:
-            logger.error('The interpolator was not initialized, call initialize_star_shape first')
+            self.logger.error('The interpolator was not initialized, call initialize_star_shape first')
             return None
         else:
             return np.max(np.linalg.norm(self.obs_positions_showerplane[:, :-1], axis=-1))
@@ -159,7 +162,7 @@ class coreasInterpolator:
         returns the maximal radius of the star shape pattern on ground
         """
         if not self.star_shape_initialized:
-            logger.error('The interpolator was not initialized, call initialize_star_shape first')
+            self.logger.error('The interpolator was not initialized, call initialize_star_shape first')
             return None
         else:
             return np.max(np.linalg.norm(self.obs_positions_ground[:, :-1], axis=-1))
@@ -176,7 +179,7 @@ class coreasInterpolator:
         Get an array of zeros in the shape of the electric field on the sky
         """
         if not self.star_shape_initialized:
-            logger.error('The interpolator was not initialized, call initialize_star_shape first')
+            self.logger.error('The interpolator was not initialized, call initialize_star_shape first')
             return None
         else:
             return np.zeros_like(self.electric_field_on_sky[0, :, :])
@@ -235,7 +238,7 @@ class coreasInterpolator:
         # from the N-S axis or 2 degrees away from zenith
         if (np.allclose(np.abs(vxB_on_sky), [0, 0, 1], atol=1e-1, rtol=0) or
                 np.allclose(np.abs(vxB_on_sky), [0, 1, 0], atol=1e-1, rtol=0)):
-            logger.info(
+            self.logger.info(
                 "The coordinate axes in the on-sky coordinate system align too close with the vxB or vxvxB axes. "
                 "This can cause problems in interpolation, so I will rotate the electric fields polarisations... "
             )
@@ -304,7 +307,7 @@ class coreasInterpolator:
 
         # Use closest observer when geomagnetic angle is smaller than 15deg
         if geomagnetic_angle < 15 * units.deg:
-            logger.warning(
+            self.logger.warning(
                 f'The geomagnetic angle is {geomagnetic_angle / units.deg:.2f} deg, '
                 f'which is smaller than 15deg, which is the lower limit for the signal interpolation. '
                 f'The closest observer is used instead.'
@@ -316,11 +319,11 @@ class coreasInterpolator:
 
             return None
 
-        logger.info(
+        self.logger.info(
             f'Initialising electric field interpolator with lowfreq {interp_lowfreq / units.MHz} MHz '
             f'and highfreq {interp_highfreq / units.MHz} MHz'
         )
-        logger.debug(
+        self.logger.debug(
             f'The following interpolation settings are used: {interp_options}'
         )
 
@@ -378,8 +381,8 @@ class coreasInterpolator:
             np.sum(efield[quantity]) for efield in self.sim_station.get_electric_fields()
         ]  # the fluence is calculated per polarization, so we need to sum them up
 
-        logger.info(f'Initialising fluence interpolator')
-        logger.debug(f'The following interpolation settings are used: {interp_options}')
+        self.logger.info(f'Initialising fluence interpolator')
+        self.logger.debug(f'The following interpolation settings are used: {interp_options}')
 
         self.fluence_interpolator = cr_pulse_interpolator.interpolation_fourier.interp2d_fourier(
             self.obs_positions_showerplane[:, 0],
@@ -412,12 +415,12 @@ class coreasInterpolator:
 
         if len(position_on_ground) == 2:
             position_on_ground = np.append(position_on_ground, core[2])
-            logger.info(
+            self.logger.info(
                 f"The antenna position is given in 2D, assuming the antenna is on the ground. "
                 f"The z-coordinate is set to the observation level {core[2] / units.m:.2f}m"
             )
         elif abs(position_on_ground[2] - core[2]) > 5 * units.cm:
-            logger.warning(
+            self.logger.warning(
                 f"The antenna z-coordinate {position_on_ground[2]} differs significantly from "
                 f"the observation level {core[2]}. This behaviour is not tested, so only proceed "
                 f"if you know what you are doing."
@@ -461,12 +464,12 @@ class coreasInterpolator:
         trace_start_time : float
             Start time of the trace
         """
-        logger.debug(
+        self.logger.debug(
             f"Getting interpolated efield for antenna position {position_on_ground} on ground"
         )
 
         antenna_pos_showerplane = self.get_position_showerplane(position_on_ground)
-        logger.debug(f"The antenna position in shower plane is {antenna_pos_showerplane}")
+        self.logger.debug(f"The antenna position in shower plane is {antenna_pos_showerplane}")
 
         # interpolate electric field at antenna position in shower plane which are inside star pattern
         if not self.efield_interpolator_initialized:
@@ -518,12 +521,12 @@ class coreasInterpolator:
         fluence_interp : float
             interpolated fluence value
         """
-        logger.debug(
+        self.logger.debug(
             f"Getting interpolated fluence for antenna position {position_on_ground} on ground"
         )
 
         antenna_pos_showerplane = self.get_position_showerplane(position_on_ground)
-        logger.debug(f"The antenna position in shower plane is {antenna_pos_showerplane}")
+        self.logger.debug(f"The antenna position in shower plane is {antenna_pos_showerplane}")
 
         # interpolate fluence at antenna position, letting interpolator handle extrapolation
         fluence_interp = self.fluence_interpolator(antenna_pos_showerplane[0], antenna_pos_showerplane[1])
@@ -558,7 +561,7 @@ class coreasInterpolator:
         # The interpolated values were the start times which were already in internal units, so what comes out
         # is also in internal units, ie no need to multiply with units.second here
         efield_start_time = self.efield_interpolator(*antenna_pos_showerplane[:2])
-        logger.debug(
+        self.logger.debug(
             f'Returning the electric field of the closest observer position, '
             f'which is {distances[index] / units.m:.2f}m away from the antenna, the time is interpolated'
         )
@@ -579,7 +582,7 @@ class coreasInterpolator:
         ax : axis object
         """
         if not self.fluence_interpolator_initialized:
-            logger.error('The fluence interpolator was not initialized, call initialize_fluence_interpolator first')
+            self.logger.error('The fluence interpolator was not initialized, call initialize_fluence_interpolator first')
             return None
 
         # Make color plot of f(x, y), using a meshgrid

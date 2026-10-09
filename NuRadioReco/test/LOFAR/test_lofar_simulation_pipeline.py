@@ -59,22 +59,22 @@ def validate_reco_vs_mc_truth(test_event):
 # event_id below
 sim_data_path = Path("./test-data/hdf5_sims")
 output_path = Path("./test-data/output-sim-pipeline")
-download_from_dataserver(
-    remote_path="lofar_share/lofar-sample-event-sim.tar.gz",
-    target_path=str(sim_data_path / "sample-sim.tar.gz"),
-)
+# download_from_dataserver(
+#     remote_path="lofar_share/lofar-sample-event-sim.tar.gz",
+#     target_path=str(sim_data_path / "sample-sim.tar.gz"),
+# )
 event_id = 92380604
 mass = "proton"
 coreas_sim_id = "000082"
 coreas_hdf5_file = f"SIM{coreas_sim_id}.hdf5"  # Replace with the actual HDF5 file name for the simulated event
 
 pipeline_path = Path("./test-data/pipeline")
-atmosphere_dir = Path("./test-data/pipeline/atmosphere")
+atmosphere_dir = Path("./test-data/pipeline/gdas_cache")
 noise_library_dir = pipeline_path / "noise_library"
-download_from_dataserver(
-    remote_path=f"lofar_share/pipeline-results-{event_id}.tar.gz",
-    target_path=str(pipeline_path / f"pipeline-results-{event_id}.tar.gz"),
-)
+# download_from_dataserver(
+#     remote_path=f"lofar_share/pipeline-results-{event_id}.tar.gz",
+#     target_path=str(pipeline_path / f"pipeline-results-{event_id}.tar.gz"),
+# )
 
 # Start from the actual CLI defaults
 # parse_args([]) would require event_id; do not parse the notebook kernel's argv.
@@ -86,7 +86,7 @@ pipeline_args.output_dir = str(output_path)
 pipeline_args.output_nur = None # do NOT save for the test, as we want to compare the results with the pre-saved ones
 pipeline_args.core_spread = core_spread # see above
 pipeline_args.atmosphere_dir = atmosphere_dir
-pipeline_args.gdas_cache_dir = str(output_path / "gdas_cache")
+pipeline_args.gdas_cache_dir = atmosphere_dir
 pipeline_args.ift_iterations = 2        # increase for more refined reconstruction
 pipeline_args.ift_samples = 40          # increase for more refined reconstruction
 pipeline_args.enable_fluence_correlated_field = False       # disabled for demonstration, setting to True might increase runtime and memory usage 

@@ -24,6 +24,8 @@ import NuRadioReco.modules.efieldToVoltageConverter
 import NuRadioReco.modules.trigger.simpleThreshold
 import NuRadioReco.modules.eventTypeIdentifier
 import NuRadioReco.modules.measured_noise.channelMeasuredNoiseAdder
+import NuRadioReco.modules.channelSignalReconstructor
+import NuRadioReco.modules.electricFieldSignalReconstructor
 
 from NuRadioReco.utilities import units, trace_utilities
 from NuRadioReco.detector import detector
@@ -31,6 +33,7 @@ from NuRadioReco.modules.io.coreas import coreas, coreasInterpolator, readCoREAS
 from NuRadioReco.utilities.dataservers import download_from_dataserver
 from NuRadioReco.framework.parameters import showerParameters as shp
 from NuRadioReco.framework.parameters import stationParameters as stp
+from NuRadioReco.framework.parameters import channelParameters as chp
 from NuRadioReco.framework.parameters import electricFieldParameters as efp
 from NuRadioReco.utilities.trace_utilities import get_electric_field_energy_fluence
 
@@ -61,7 +64,8 @@ from NuRadioReco.utilities.LOFAR import (
     NOISE_LIBRARY_NUR_FILEPATH,
     ALWAYS_REMOVED_CHANNEL_IDS,
     SIM_CORE_SPREAD,
-    BANDPASS_HALF_HANN_PERCENT
+    BANDPASS_HALF_HANN_PERCENT,
+    BANDPASS_GAUSSIAN_ROLL_WIDTH
 )  # noqa: E402
 
 # Antenna sets the generator can simulate. LOFAR1.0 reads out one LBA mode at a
@@ -209,6 +213,10 @@ class CoREASEventGenerator:
         Note: only the modules are initialised, and the begin functions are called in the run_pipeline function, since some modules require event information to be initialised.
         """
         self.LORASimulator = LORASimulator.LORASimulator()
+
+        self.electricFieldSignalReconstructor = (
+            NuRadioReco.modules.electricFieldSignalReconstructor.electricFieldSignalReconstructor()
+        )
         
         # Initialize the modules
         self.efieldToVoltageConverter = (
@@ -225,8 +233,13 @@ class CoREASEventGenerator:
             NuRadioReco.modules.channelResampler.channelResampler()
         )
 
-        self.triggerSimulator = (
-            NuRadioReco.modules.trigger.simpleThreshold.triggerSimulator()
+        self.LOFARnoiseLibraryConverter = LOFARnoiseLibraryConverter()
+        self.channelMeasuredNoiseAdder = (
+            NuRadioReco.modules.measured_noise.channelMeasuredNoiseAdder.channelMeasuredNoiseAdder()
+        )
+
+        self.channelSignalReconstructor = (
+            NuRadioReco.modules.channelSignalReconstructor.channelSignalReconstructor()
         )
 
         self.eventTypeIdentifier = (
@@ -241,10 +254,7 @@ class CoREASEventGenerator:
 
         self.coreas_reader = readCoREASDetector.readCoREASDetector()
 
-        self.LOFARnoiseLibraryConverter = LOFARnoiseLibraryConverter()
-        self.channelMeasuredNoiseAdder = (
-            NuRadioReco.modules.measured_noise.channelMeasuredNoiseAdder.channelMeasuredNoiseAdder()
-        )
+        
 
 
 
@@ -298,10 +308,13 @@ class CoREASEventGenerator:
         # pre_pulse and post_pulse_times sets the padding added before and after the pulse.
         # we should ideally add to match the trace length of the data, but we also do not need that much.
         # but we should have enough to sufficiently pad the traces.
-        # currently set to 500 ns, which corresponds to +- 100 samples after resampling with LOFAR
+        # currently set to 1000 ns, which corresponds to +- 200 samples after resampling with LOFAR
         self.efieldToVoltageConverter.begin(
             debug=False, pre_pulse_time=1000 * units.ns, post_pulse_time=1000 * units.ns
         )
+        self.electricFieldSignalReconstructor.begin(
+            signal_window_pre=10 * units.ns, signal_window_post=40 * units.ns, noise_window=100 * units.ns
+        ) # defaults from the begin() function
         self.channelResampler.begin()
         self.channelMeasuredNoiseAdder.begin(
             filenames = [noise_library_nur_filepath],
@@ -313,8 +326,10 @@ class CoREASEventGenerator:
             debug=True,
         )
         self.channelBandPassFilter.begin()
-        self.channelResampler.begin()
-        self.triggerSimulator.begin()
+        self.channelSignalReconstructor.begin(
+            signal_window_length = 55 * units.ns,
+            coincidence_window_size = 20 * units.ns
+        )
         self.eventTypeIdentifier.begin()
         # window size and noise window reduced since number of samples is smaller for simulated traces. The numbers here are arbitrary at the moment.
         self.pulse_finder.begin(
@@ -353,22 +368,29 @@ class CoREASEventGenerator:
                 if save_debug_plots:
                     self._save_efield_trace_snapshot(evt, station.get_sim_station(), output_dir=event_debug_dir, stage="01_reader")
 
-                # Convert electric field to voltage.
+                # calculate the true energy fluence 
+                # since efields are stored in sim_station, need to pass in sim_station!
+                self.electricFieldSignalReconstructor.run(evt, station.get_sim_station(), self.detector)
+                if save_debug_plots:
+                    # should include energy fluence map with error also included
+                    self._save_fluence_plot(evt, station.get_sim_station(), self.detector.get_absolute_position(station.get_id()) , output_dir=event_debug_dir, stage="02_efield_sigreco")
+
+                # Convert electric field to voltage
                 self.efieldToVoltageConverter.run(
                     evt, station, self.detector,
                     channel_ids=self.selected_station_channel_ids.get(station.get_id()))
                 if save_debug_plots:
-                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="02_efieldToVoltage")
+                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="03_efieldToVoltage")
 
                 # resample the trace to that of LOFAR (uses the default if not provided)
                 self.channelResampler.run(evt, station, self.detector)
                 if save_debug_plots:
-                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="03_resample")
+                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="04_resample")
 
                 # # Add measured noise from LOFAR
                 self.channelMeasuredNoiseAdder.run(evt, station, self.detector)
                 if save_debug_plots:
-                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="04_measured_noise")
+                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="05_measured_noise")
 
                 # apply the bandpass filter to the traces. This is done twice, once with a gaussian taper and once with a hann taper. This is done to replicate the data pipeline.
                 self.channelBandPassFilter.run(
@@ -377,7 +399,7 @@ class CoREASEventGenerator:
                     self.detector,
                     passband=[PASS_BAND[0] * units.MHz, PASS_BAND[1] * units.MHz],
                     filter_type="gaussian_tapered",
-                    roll_width=2.5 * units.MHz,
+                    roll_width=BANDPASS_GAUSSIAN_ROLL_WIDTH * units.MHz,
                 )
                 self.channelBandPassFilter.run(
                     evt,
@@ -388,7 +410,14 @@ class CoREASEventGenerator:
                     half_hann_percent=BANDPASS_HALF_HANN_PERCENT,
                 )
                 if save_debug_plots:
-                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="05_bandpass")
+                    self._save_trace_snapshot(evt, station, output_dir=event_debug_dir, stage="06_bandpass")
+
+                # calculate signal properties
+                self.channelSignalReconstructor.run(evt, station, self.detector)
+                if save_debug_plots:
+                    # should include channel fluence map with error also included
+                    self._save_channel_fluence_plot(evt, station, self.detector.get_absolute_position(station.get_id()), output_dir=event_debug_dir, stage="07_channel_signal_reco")
+                
 
                 # Identify event type
                 self.eventTypeIdentifier.run(evt, station, mode='forced', forced_event_type='cosmic_ray')
@@ -412,7 +441,6 @@ class CoREASEventGenerator:
             self.efieldToVoltageConverter.end()
             self.channelResampler.end()
             self.channelBandPassFilter.end()
-            self.triggerSimulator.end()
             self.pulse_finder.end()
             self.direction_fitter.end()
             self.LOFARnoiseLibraryConverter.end()
@@ -450,10 +478,11 @@ class CoREASEventGenerator:
         corsika_event = coreas.read_CORSIKA7(coreas_hdf5_file, site='lofar')
 
         # here we force vertical core coordinate
+        sim_core = corsika_event.get_first_sim_shower().get_parameter(shp.core)
         corsika_event.get_first_sim_shower().set_parameter(
             shp.core,
             np.array(
-                [0, 0, corsika_event.get_first_sim_shower().get_parameter(shp.observation_level)]
+                [sim_core[0], sim_core[1], corsika_event.get_first_sim_shower().get_parameter(shp.observation_level)]
             ),
         )
 
@@ -611,7 +640,7 @@ class CoREASEventGenerator:
         fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
         ytick_positions = []
         ytick_labels = []
-        pol_colors = ['r', 'b', 'g']
+        pol_colors = ['indianred', 'royalblue', 'forestgreen']
         for i_ch, efield in enumerate(efields):
             trace = efield.get_trace()
             efield_id = efield.get_unique_identifier()[0][0]
@@ -635,6 +664,80 @@ class CoREASEventGenerator:
             os.path.join(
                 output_dir,
                 f"{stage}_efield_traces_CS{sim_station.get_id():03d}_{event.get_id()}.png",
+            ),
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    def _save_fluence_plot(self, event, sim_station, station_abs_pos, output_dir, stage):
+        """
+        Save the fluence as a function of the distance from the simulated radio core.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+        energy_fluences = np.array([e.get_parameter(efp.signal_energy_fluence) for e in sim_station.get_electric_fields()]).T
+        energy_fluences_err = np.array([e.get_parameter_error(efp.signal_energy_fluence) for e in sim_station.get_electric_fields()]).T
+        antenna_positions = [e.get_position() + station_abs_pos for e in sim_station.get_electric_fields()]
+        distance_from_core = np.linalg.norm(np.array(antenna_positions) - event.get_first_sim_shower().get_parameter(shp.core), axis=1)
+        pol_colors = ['indianred', 'royalblue', 'forestgreen']
+        labels = ['x', 'y', 'z']
+        fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+        for i in range(3):
+            ax.errorbar(distance_from_core / units.m, energy_fluences[i,:] / (units.eV / units.m2), yerr=energy_fluences_err[i,:] / (units.eV / units.m2), marker='o', color=pol_colors[i], ls="", label=labels[i])
+        ax.set_xlabel('Distance to Core / m')
+        ax.set_ylabel('Energy fluence / eV m$^{-2}$')
+        ax.set_title(f"{stage}: CS{sim_station.get_id():03d} Bandpassed energy fluence")
+        ax.legend()
+        fig.savefig(
+            os.path.join(
+                output_dir,
+                f"{stage}_energy_fluence_CS{sim_station.get_id():03d}_{event.get_id()}.png",
+            ),
+            dpi=150,
+            bbox_inches="tight",
+        )
+        plt.close(fig)
+
+    def _save_channel_fluence_plot(self, event, station, station_abs_pos, output_dir, stage):
+        """
+        Save the fluence as a function of the distance from the simulated radio core.
+        """
+        os.makedirs(output_dir, exist_ok=True)
+
+        # iterate over channels, and store the fluence using the channel group IDs 
+        # as each antenna arm
+        channel_fluences = []
+        channel_fluences_error = []
+        antenna_positions = []
+
+        channel_group_ids = station.get_channel_ids(return_group_ids=True)
+
+        for ch_grp_id in channel_group_ids:
+            f_tot = 0
+            f_err = 0
+            for channel_per_group in station.iter_channel_group(ch_grp_id):
+                # get the signal fluence and its error
+                f_tot += channel_per_group.get_parameter(chp.signal_fluence)
+                f_err += channel_per_group.get_parameter_error(chp.signal_fluence)**2
+
+            channel_fluences.append(f_tot)
+            channel_fluences_error.append(np.sqrt(f_err))
+
+        # we use the same antenna position as stored in the simulation. the reason for this is that the 
+        # channel objects do not have position information stored. 
+        antenna_positions = [e.get_position() + station_abs_pos for e in station.get_sim_station().get_electric_fields()]
+        distance_from_core = np.linalg.norm(np.array(antenna_positions) - event.get_first_sim_shower().get_parameter(shp.core), axis=1)
+        
+        fig, ax = plt.subplots(figsize=(10, 5), constrained_layout=True)
+        ax.errorbar(distance_from_core / units.m, np.array(channel_fluences) / (units.eV / units.m), yerr=np.array(channel_fluences_error) / (units.eV / units.m), marker='o', color='k', ls="")
+        ax.set_xlabel('Distance to Core / m')
+        ax.set_ylabel('Channel fluence / eV m$^{-1}$')
+        ax.set_title(f"{stage}: CS{station.get_id():03d} Bandpassed channel fluence")
+
+        fig.savefig(
+            os.path.join(
+                output_dir,
+                f"{stage}_channel_fluence_CS{station.get_id():03d}_{event.get_id()}.png",
             ),
             dpi=150,
             bbox_inches="tight",
