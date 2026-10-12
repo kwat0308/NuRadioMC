@@ -14,6 +14,7 @@ import radiotools.helper as hp
 from NuRadioReco.modules.base.module import register_run
 from NuRadioReco.detector import antennapattern
 from NuRadioReco.framework.parameters import electricFieldParameters as efp
+from NuRadioReco.framework.parameters import showerParameters as shp
 from scipy.spatial import cKDTree
 from NuRadioReco.utilities import units, fft
 import NuRadioReco.framework.channel
@@ -23,6 +24,8 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import matplotlib.colors as mcolors
 import scipy
+from NuRadioReco.modules.io.coreas import coreasInterpolator
+from cr_pulse_interpolator.interpolation_fourier import interp2d_fourier
 
 conversion_factor_integrated_signal = scipy.constants.c * scipy.constants.epsilon_0 * units.joule / units.s / units.volt ** 2
 
@@ -289,6 +292,7 @@ def plot_reco_histograms(
     reco_scale_factor_successful,
     mc_core_x=None,
     mc_core_y=None,
+    no_core_fit=False,
     save_path=None
 ):
     """
@@ -305,7 +309,13 @@ def plot_reco_histograms(
     reco_scale_factor_successful : np.ndarray
         The reconstructed scale factors of the successful reconstructions.
     """
-    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    if no_core_fit:
+        print("No core fit was performed, so core x and y histograms will not be plotted.")
+        reco_core_x_successful = np.array([])
+        reco_core_y_successful = np.array([])
+        fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    else:
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     axes = axes.flatten()
 
     axes[0].hist(reco_red_chi2_vals_successful, bins=15, color='b', alpha=0.7)
@@ -317,29 +327,30 @@ def plot_reco_histograms(
     axes[0].axvline(x=1, color='k', linestyle='--', label='Chi² = 1')  # Add a vertical line at Chi² = 1
     axes[0].legend()
 
-    axes[1].hist(reco_core_x_successful, bins=15, color='g', alpha=0.7)
-    axes[1].set_title('Reconstructed Core X Histogram')
-    axes[1].set_xlabel('Core X (m)')
+    axes[1].hist(reco_scale_factor_successful, bins=15, color='c', alpha=0.7)
+    axes[1].set_title('Reconstructed Scale Factor Histogram')
+    axes[1].set_xlabel('Scale Factor')
     axes[1].set_ylabel('Count')
-    if mc_core_x is not None:
-        axes[1].axvline(x=mc_core_x, color='k', linestyle='--', label=f'MC Core X = {mc_core_x:.2f} m')  # Add a vertical line at MC Core X
-        axes[1].legend()
+    axes[1].set_yscale('log')  # Set y-axis to log scale for better visibility of low counts
+    axes[1].axvline(x=1, color='k', linestyle='--', label='Scale Factor = 1')  # Add a vertical line at Scale Factor = 1
+    axes[1].legend()
+    
+    if not no_core_fit:
+        axes[2].hist(reco_core_x_successful, bins=15, color='g', alpha=0.7)
+        axes[2].set_title('Reconstructed Core X Histogram')
+        axes[2].set_xlabel('Core X (m)')
+        axes[2].set_ylabel('Count')
+        if mc_core_x is not None:
+            axes[2].axvline(x=mc_core_x, color='k', linestyle='--', label=f'MC Core X = {mc_core_x:.2f} m')  # Add a vertical line at MC Core X
+            axes[2].legend()
 
-    axes[2].hist(reco_core_y_successful, bins=15, color='r', alpha=0.7)
-    axes[2].set_title('Reconstructed Core Y Histogram')
-    axes[2].set_xlabel('Core Y (m)')
-    axes[2].set_ylabel('Count')
-    if mc_core_y is not None:
-        axes[2].axvline(x=mc_core_y, color='k', linestyle='--', label=f'MC Core Y = {mc_core_y:.2f} m')  # Add a vertical line at MC Core Y
-        axes[2].legend()
-
-    axes[3].hist(reco_scale_factor_successful, bins=15, color='c', alpha=0.7)
-    axes[3].set_title('Reconstructed Scale Factor Histogram')
-    axes[3].set_xlabel('Scale Factor')
-    axes[3].set_ylabel('Count')
-    axes[3].set_yscale('log')  # Set y-axis to log scale for better visibility of low counts
-    axes[3].axvline(x=1, color='k', linestyle='--', label='Scale Factor = 1')  # Add a vertical line at Scale Factor = 1
-    axes[3].legend()
+        axes[3].hist(reco_core_y_successful, bins=15, color='r', alpha=0.7)
+        axes[3].set_title('Reconstructed Core Y Histogram')
+        axes[3].set_xlabel('Core Y (m)')
+        axes[3].set_ylabel('Count')
+        if mc_core_y is not None:
+            axes[3].axvline(x=mc_core_y, color='k', linestyle='--', label=f'MC Core Y = {mc_core_y:.2f} m')  # Add a vertical line at MC Core Y
+            axes[3].legend()
     
     if save_path is not None:
         fig.savefig(save_path, dpi=250, bbox_inches="tight")
@@ -410,7 +421,9 @@ class miniChannelFluenceCalculator:
         # allows for fast lookup of the antenna position and orientation for each channel, without having to query the detector for each channel in each event.
         self._groups = []   # one entry per antenna = per channel group
         
-        for station_id, ch_ids in selected_station_channel_ids.items():
+        station_channel_ids = selected_station_channel_ids if selected_station_channel_ids is not None else {station_id: self.detector.get_channel_ids(station_id) for station_id in self.detector.get_station_ids()}
+        
+        for station_id, ch_ids in station_channel_ids.items():
             by_group = {}
             for ch in ch_ids:
                 by_group.setdefault(self.detector.get_channel_group_id(station_id, ch), []).append(ch)
@@ -511,103 +524,130 @@ class miniChannelFluenceCalculator:
             mask = np.abs(t - tpk) < 0.5 * self.signal_window_length
             fluence[rows] = (v**2 * mask).sum(axis=(-1, -2)) * norm
 
-        # return fluence[self._kdtree_indices], self._positions[self._kdtree_indices]
-
         
-        # time_start = time.time()
-        # E = np.zeros((len(self._groups), 3, n_time_bins))  # shape (n_groups, 3, n_time_bins)
-        # for station in event.get_stations():
-        #     sim_station = station.get_sim_station()
-        #     for ef in sim_station.get_electric_fields():          # one per group
-        #         grp_id = self.detector.get_channel_group_id(station.get_id(), ef.get_channel_ids()[0])
-        #         E[self._group_index[(station.get_id(), grp_id)]] = ef.get_trace()
-        # time_end = time.time()
-        # print(f"Time to get out the efields: {time_end - time_start:.4f} s")
-        
-        # time_start = time.time()
-        # Ef = fft.time2freq(E, sampling_rate)[..., :n_f]                        # (n_ant, 3, n_f)
-        # V = R[None, :, 0] * Ef[:, None, 1] + R[None, :, 1] * Ef[:, None, 2]   # (n_ant, 2, n_f)
-
-        # v = fft.freq2time(V, det_sampling_rate, n=n_new)                                  # (n_ant, 2, n_new)
-        # time_end = time.time()
-        # print(f"Time to get out the voltages: {time_end - time_start:.4f} s")
-        
-        # time_start = time.time()
-        # t = np.arange(n_new) / det_sampling_rate
-        # tpk = t[np.argmax(np.abs(v), axis=-1)][..., None]
-        # mask = np.abs(t - tpk) < 0.5 * self.signal_window_length
-        # fluence = (v**2 * mask).sum(-1).sum(-1) / det_sampling_rate * conversion_factor_integrated_signal   # (n_ant,)
-        # time_end = time.time()
-        # print(f"Time to get out the fluences: {time_end - time_start:.4f} s")
-
-        # sim_fluences = []
-        # sim_ant_pos = []
-        # for station in event.get_stations():
-        #     sim_station = station.get_sim_station()
-        #     sim_station_id = sim_station.get_id()
-            
-        #     station_pos = self.detector.get_absolute_position(station.get_id())
-            
-        #     channel_ids_to_use = self.detector.get_channel_ids(sim_station_id) if selected_station_channel_ids == None else selected_station_channel_ids[station.get_id()]
-            
-        #     sim_efields = [ef for ef in sim_station.get_electric_fields() if ef.has_channel_ids(channel_ids_to_use)]
-            
-            
-            
-            # channel_group_id = None
-            # fluence_per_channel_group = 0.0
-            
-            # for sim_efield in sim_efields:
-                
-            #     efield_fft = sim_efield.get_frequency_spectrum()
-                
-            #     print(sim_efield.get_channel_ids())
-                
-            #     for channel_id in sim_efield.get_channel_ids():
-                    
-            #         voltage_fft = vel[0] * efield_fft[1] + vel[1] * efield_fft[2]
-            #         voltage_fft[np.where(self.__freqs < 5 * units.MHz)] = 0.
-
-            #     #     voltage_ffts.append(voltage_fft)
-                    
-            #     channel_spectrum = np.sum(np.array(voltage_ffts), axis=0)
-                
-            #     # store the fluence in this channel object, since we want to get 
-            #     # out the trace & apply resampling to it
-            #     channel_obj = NuRadioReco.framework.channel.Channel(channel_id, channel_group_id=channel_group_id)
-            #     channel_obj.set_frequency_spectrum(channel_spectrum, sampling_rate)
-                
-            #     # now run the resampler to resample to detector sampling rate
-            #     channel_obj.resample(sampling_rate=det_sampling_rate)
-                
-            #     # calculate fluence
-            #     traces = channel_obj.get_trace()
-            #     times = channel_obj.get_times()
-            #     peak_time = times[np.argmax(np.abs(traces))]
-            #     time_window = (times > peak_time - 0.5 * self.signal_window_length) & (times < peak_time + 0.5 * self.signal_window_length)
-            #     fluence = np.sum(traces[time_window]**2) * (times[1] - times[0]) * conversion_factor_integrated_signal
-                
-            #     fluence_per_channel_group += fluence
-        
-        
-        # # convert to numpy arrays
-        # sim_fluences = np.array(sim_fluences)
-        # sim_ant_pos = np.array(sim_ant_pos)
-        # print(f"sim_fluences: {np.max(sim_fluences)}")
-        
-        # # finally sort the fluences and antenna positions by the antenna positions, so that they are in the same order as the data antenna positions. This is important for the reconstruction, since we want to compare the simulated fluences with the data fluences.
-        # # we use a KDTree to find the nearest neighbor in the simulated antenna positions for each data antenna position, and then sort the fluences and antenna positions accordingly.
-        # tree = cKDTree(sim_ant_pos)
-        # _, indices = tree.query(self.data_antenna_positions)
-        # sim_fluences_sorted = sim_fluences[indices]
-        # sim_ant_pos_sorted = sim_ant_pos[indices]
-        # print(f"sim_fluences sorted: {np.max(sim_fluences_sorted)}")
-        
-        # return sim_fluences_sorted, sim_ant_pos_sorted
         return fluence[self._kdtree_indices], self._positions[self._kdtree_indices]
     
+    def get_fluence_new_temp(self, corsika_event, core):
+        # get out the zenith and azimuth angles from a single electric field object, since we assume that all channels have the same arrival direction. This is indeed the case for air showers, but not necessarily for other types of events.
+        sim_station = corsika_event.get_station(0).get_sim_station()
+        station_id_to_use = self.detector.get_station_ids()[0]
+        channel_id_to_use = self.detector.get_channel_ids(station_id_to_use)[0]
+        
+        efield_to_use = sim_station.get_electric_fields()[0]
+        zenith = efield_to_use[efp.zenith]
+        azimuth = efield_to_use[efp.azimuth]
+        sampling_rate = efield_to_use.get_sampling_rate()
+        
+        det_sampling_rate = self.detector.get_sampling_frequency(station_id_to_use, channel_id_to_use)
+        n_time_bins = efield_to_use.get_number_of_samples()
+        
+        n_new = int(round(n_time_bins * det_sampling_rate / sampling_rate))
+        n_f = n_new // 2 + 1
+        self.__freqs = efield_to_use.get_frequencies()[:n_f]
+        
+        # get the antenna response at at given zenith & azimuth angle. This is done in a vectorized way, so that we can get the response for all channels at once. Only valid since we assume that all channels in a group have the same orientation. This is much faster than doing it for each channel separately.
+        geo_param_key = (zenith, azimuth, n_time_bins, sampling_rate)
+        if geo_param_key != getattr(self, "_R_key", None):
+            vX = self.antenna_pattern.get_antenna_response_vectorized(self.__freqs, zenith, azimuth, *self.antenna_orientation[0])
+            vY = self.antenna_pattern.get_antenna_response_vectorized(self.__freqs, zenith, azimuth, *self.antenna_orientation[1])
+            self._R = np.array([[vX['theta'], vX['phi']], [vY['theta'], vY['phi']]])
+            self._R_key = geo_param_key
+        R = self._R
+
+        
+        fluence_starshape = []
+        ant_pos_starshape = []
+        t = np.arange(n_new) / det_sampling_rate
+        norm = conversion_factor_integrated_signal / det_sampling_rate
+
+        for efield in corsika_event.get_station(0).get_sim_station().get_electric_fields():
+
+            # only eTheta, ePhi are needed: drops 1/3 of the memory
+            E = efield.get_trace()[1:3]         # (2, n_t)
+            Ef = fft.time2freq(E, sampling_rate)[..., :n_f]                # (2, n_f)
+            del E
+
+            V = R[:, 0] * Ef[0] + R[:, 1] * Ef[1]   # (2 ch, n_f)
+            del Ef
+            v = fft.freq2time(V, det_sampling_rate, n=n_new)               # (2 ch, n_new)
+            
+            tpk = t[np.argmax(np.abs(v), axis=-1)][..., None]
+            mask = np.abs(t - tpk) < 0.5 * self.signal_window_length
+            fluence_starshape.append((v**2 * mask).sum(axis=(-1, -2)) * norm)
+            ant_pos_starshape.append(
+                efield.get_position()
+            )
+            
+        # convert to numpy array
+        fluence_starshape = np.array(fluence_starshape)
+        ant_pos_starshape = np.array(ant_pos_starshape) # check
+        print(len(fluence_starshape), ant_pos_starshape.shape)
+        
+        # then use fluence interpolator to interpolate to actual antenna positions
+        # we can use the coreas interpolator to actually get the antenna positions in the shower plane
+        coreas_interpolator = coreasInterpolator.coreasInterpolator(corsika_event)
+        
+        true_core = coreas_interpolator.shower.get_parameter(shp.core)
+        ant_pos_starshape_showerplane = coreas_interpolator.cs.transform_to_vxB_vxvxB(ant_pos_starshape, core=true_core)
+        fluence_interpolator = interp2d_fourier(ant_pos_starshape_showerplane[:, 0], ant_pos_starshape_showerplane[:, 1], fluence_starshape)
+        
+        # now itnerpolate
+        fit_core = np.array([core[0], core[1], true_core[2]])
+        det_ant_pos_showerplane = coreas_interpolator.cs.transform_to_vxB_vxvxB(self.data_antenna_positions - fit_core, core=true_core)
+        fluence_interpolated = fluence_interpolator(det_ant_pos_showerplane[:, 0], det_ant_pos_showerplane[:, 1])
+        
+        return fluence_interpolated, self.data_antenna_positions
+
     def end(self):
         """
         Finalize the calculator.
         """
         pass
+    
+    
+def _gaussian(x, mu, sigma, amp):
+    return amp * np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+
+
+def fit_gaussian(errors):
+    """Fit a Gaussian to an array of errors; return (mu, sigma)."""
+    counts, edges = np.histogram(errors, bins="auto")
+    centres = 0.5 * (edges[:-1] + edges[1:])
+    p0 = [np.mean(errors), np.std(errors), counts.max()]
+    try:
+        popt, _ = scipy.optimize.curve_fit(_gaussian, centres, counts, p0=p0, maxfev=5000)
+        mu, sigma = popt[0], abs(popt[1])
+    except RuntimeError:
+        mu, sigma = np.mean(errors), np.std(errors)
+    return mu, sigma
+
+def make_xmax_bias_plot(errors, label, color, fig_path, tag):
+    """Histogram of errors + Gaussian fit. Returns (mu, sigma)."""
+    if len(errors) == 0:
+        print(f"[{tag}] No {label} errors to plot.")
+        return None, None
+
+    mu, sigma = fit_gaussian(errors)
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    counts, edges, _ = ax.hist(
+        errors, bins="auto", color=color, alpha=0.7,
+        label=f"{label} errors (N={len(errors)})"
+    )
+    x = np.linspace(edges[0], edges[-1], 300)
+    ax.plot(
+        x, _gaussian(x, mu, sigma, counts.max()),
+        color="k", lw=2,
+        label=rf"Gaussian: $\mu={mu:.1f}$, $\sigma={sigma:.1f}$ g cm$^{{-2}}$",
+    )
+    ax.axvline(0, color="k", ls="--", lw=1)
+    ax.set_xlabel(r"$X_\mathrm{max}^\mathrm{true} - X_\mathrm{max}^\mathrm{reco}$ / g cm$^{-2}$")
+    ax.set_ylabel("Count")
+    ax.set_title(f"Reconstruction error — {label}")
+    ax.legend(loc='upper right', fontsize=10)
+    ax.set_xlim(-120, 120)
+    fig.tight_layout()
+    fig.savefig(fig_path, dpi=250, bbox_inches="tight")
+    plt.close(fig)
+
+    return mu, sigma

@@ -6,7 +6,7 @@ CoREAS Fluence Reconstruction module for NuRadioReco.
 
 import logging
 import os
-
+import h5py
 import numpy as np
 import radiotools.helper as hp
 
@@ -60,6 +60,7 @@ class CoREASFluenceReconstructor:
         xmax_parabola_fit_range_gcm2=100.0,
         output_directory=None,
         hybrid_shower_name="LORA",
+        no_core_fit=False,
         logger_level=logging.NOTSET,
     ):
         """
@@ -129,6 +130,8 @@ class CoREASFluenceReconstructor:
         self.coreas_reader.logger.setLevel(logging.CRITICAL)
         
         self.miniChannelFluenceCalculator = miniChannelFluenceCalculator()
+        
+        self.no_core_fit = no_core_fit
 
         self.logger.setLevel(logger_level)
 
@@ -210,22 +213,25 @@ class CoREASFluenceReconstructor:
         dict
             The fit parameters of the fluence fit, with the key corresponding to the channel group ID.
         """
+        
+        def objective_function_no_core_fit(x):
+            scale_factor_sq = x
+            core = core_guess
+
+            time_start = time.time()
+            for sim_evt in self.coreas_reader.run(
+                det, [core], selected_station_channel_ids=selected_station_channel_ids
+            ):
+                time_end = time.time()
+                # print(f"Time to generate event for core position ({core_x}, {core_y}): {time_end - time_start:.4f} s")
+                sim_fluence, _ = self.miniChannelFluenceCalculator.get_fluence(sim_evt)
+            
+            # calculate the chi2 between the data fluence and the simulated fluence
+            chi2 = np.sum((data_fluence - scale_factor_sq * sim_fluence) ** 2 / data_fluence_err**2)
+            
+            return chi2
 
         def objective_function(x):
-            """
-            Objective function for the fluence fit.
-
-            This returns the chi2 value:
-
-            chi2 = sum((data_fluence[i] - scale_factor * sim_fluence[i])**2 / data_fluence_err[i]**2 for i in range(len(data_fluence)))
-
-            Unforunately need to be nested function since we use the properties of the sim_event and det objects, which are not available in the global scope.
-
-            Parameters
-            ----------
-            x : list
-                The fit parameters, with the first two elements corresponding to the core position (x, y) and the third element corresponding to the scale factor squared.
-            """
             core_x, core_y, scale_factor_sq = x
             core = np.array(
                 [
@@ -246,12 +252,34 @@ class CoREASFluenceReconstructor:
             chi2 = np.sum((data_fluence - scale_factor_sq * sim_fluence) ** 2 / data_fluence_err**2)
             
             return chi2
+        
+        if self.no_core_fit:
+            obj_func = objective_function_no_core_fit
+            x0 = [1.0]  # initial guess for scale_factor_sq
+            bounds = [(0, None)]  # scale_factor_sq must be non-negative
+            n_dof = len(data_fluence) - 1  # number of data points minus number of fit parameters
+        else:
+            obj_func = objective_function
+            x0 = [core_guess[0], core_guess[1], 1.0]  # initial guess for core_x, core_y, scale_factor_sq
+            bounds = [(-600 * units.m, 600 * units.m), (-600 * units.m, 600 * units.m), (0, None)]  # core_x and core_y must be within +/- 600 m, scale_factor_sq must be non-negative
+            n_dof = len(data_fluence) - 3  # number of data points minus number of fit parameters
 
         try:
             res = opt.minimize(
-                lambda x: objective_function(x), x0=[core_guess[0], core_guess[1], 1.0], method="CG", bounds=[(-600 * units.m, 600 * units.m), (-600 * units.m, 600 * units.m), (0, None)]
-
+                lambda x: obj_func(x), x0=x0, method="L-BFGS-B", bounds=bounds
             )
+            self.logger.info(
+                f"Fluence fit succeeded for event {sim_event.get_id()}. Fit parameters: scale_factor_sq={res.x[0]:.2f}, chi2={res.fun:.2f}, n_dof={n_dof}, success={res.success}"
+            )
+            # store the fit parameters in a dictionary
+            fit_results = {
+                "core_x": res.x[0] if not self.no_core_fit else None,
+                "core_y": res.x[1] if not self.no_core_fit else None,
+                "scale_factor_sq": res.x[2] if not self.no_core_fit else res.x[0],
+                "chi2": res.fun,
+                "n_dof": n_dof,  # number of data points minus number of fit parameters
+                "success": res.success,
+            }
         except Exception as e:
             self.logger.warning(
                 f"Fluence fit failed for event {sim_event.get_id()}. Error: {e}", exc_info=True
@@ -265,27 +293,10 @@ class CoREASFluenceReconstructor:
                 "success": False,
             }
             
-        ndof = len(data_fluence) - 3  # number of data points minus number of fit parameters
-            
         print("fit results:", res.x)
         print("fit success:", res.success)
-        print("fit red chi2:", res.fun / ndof)
+        print("fit red chi2:", res.fun / n_dof)
         print("fit nfev:", res.nfev)
-        
-        
-        self.logger.info(
-            f"Fluence fit succeeded for event {sim_event.get_id()}. Fit parameters: core_x={res.x[0]:.2f}, core_y={res.x[1]:.2f}, scale_factor_sq={res.x[2]:.2f}, chi2={res.fun:.2f}, n_dof={ndof}, success={res.success}"
-        )
-
-        # store the fit parameters in a dictionary
-        fit_results = {
-            "core_x": res.x[0],
-            "core_y": res.x[1],
-            "scale_factor_sq": res.x[2],
-            "chi2": res.fun,
-            "n_dof": ndof,  # number of data points minus number of fit parameters
-            "success": res.success,
-        }
 
         return fit_results
 
@@ -377,6 +388,8 @@ class CoREASFluenceReconstructor:
             The detector to be used for the reconstruction. This should be same as the detector used for the simulation.
         selected_station_channel_ids : list of int, optional
             The list of channel IDs to be processed. If None, all channels will be processed.
+        no_core_fit : bool, optional
+            If True, the core position will not be fitted and will be fixed to the core position of the data event. If False, the core position will be fitted along with the scale factor.
         """
         # read the event from the input files
         if self.input_files is None:
@@ -404,7 +417,7 @@ class CoREASFluenceReconstructor:
         mc_xmax = None
         mc_core = None
         try:
-            mc_xmax = data_event.get_first_sim_shower().get_parameter(shp.shower_maximum)
+            mc_xmax = data_event.get_first_sim_shower().get_parameter(shp.shower_maximum) / (units.g / units.cm**2)  # convert to g/cm^2
             mc_core = data_event.get_first_sim_shower().get_parameter(shp.core)
         except Exception:
             mc_xmax = None
@@ -431,11 +444,11 @@ class CoREASFluenceReconstructor:
                 data_fluences,
                 data_fluences_err,
                 core_guess,
-                selected_station_channel_ids,
+                selected_station_channel_ids=selected_station_channel_ids
             )
 
             reco_red_chi2_vals[i] = fit_result["chi2"] / fit_result["n_dof"]
-            reco_xmaxs[i] = corsika_sim_event.get_first_sim_shower().get_parameter(shp.shower_maximum) # in internal units
+            reco_xmaxs[i] = corsika_sim_event.get_first_sim_shower().get_parameter(shp.shower_maximum) / (units.g / units.cm**2)  # convert to g/cm^2
             reco_core_x_fit[i] = fit_result["core_x"]
             reco_core_y_fit[i] = fit_result["core_y"]
             reco_scale_factor_sq_fit[i] = fit_result["scale_factor_sq"]
@@ -461,6 +474,7 @@ class CoREASFluenceReconstructor:
                 reco_scale_factor_sq_fit_successful,
                 mc_core_x=mc_core[0] if mc_core is not None else None,
                 mc_core_y=mc_core[1] if mc_core is not None else None,
+                no_core_fit=self.no_core_fit,
                 save_path=os.path.join(
                     self.__settings["output_directory"],
                     f"reco_histograms_event_{data_event.get_id()}.png",
@@ -495,9 +509,9 @@ class CoREASFluenceReconstructor:
             self.logger.info(
                 f"Parabola fit parameters: {parabola_fit_param[0]:.2f} x^2 + {parabola_fit_param[1]:.2f} x + {parabola_fit_param[2]:.2f}, \n"
                 f"Chi2 at minimum: {parabola_fit_param[2]:.2f}, \n"
-                f"Reconstructed Xmax: {xmax_reconstructed / (units.g / units.cm**2):.2f} g/cm^2", 
+                f"Reconstructed Xmax: {xmax_reconstructed:.2f} g/cm^2", 
             )
-
+            
         # plot the chi2 parabola
         for reco_fit_param, label in zip(
             [reco_scale_factor_sq_fit_successful, reco_core_x_fit_successful, reco_core_y_fit_successful],
@@ -506,6 +520,12 @@ class CoREASFluenceReconstructor:
             if label == "scale_factor":
                 # take the square root of the scale factor squared to get the scale factor
                 reco_fit_param = np.sqrt(reco_fit_param)
+                
+            if self.no_core_fit and label in ["core_x", "core_y"]:
+                self.logger.info(
+                    f"Skipping chi2 parabola plot for {label} because no core fit was performed."
+                )
+                continue
 
             try:
                 fig = plot_chi2_parabola(
@@ -530,6 +550,79 @@ class CoREASFluenceReconstructor:
                     f"Failed to plot chi2 parabola for fit parameter {label}. Error: {e}", exc_info=True
                 )
 
+        # take a shortcut for now and simply take the average of the corex, corey and scale factor squared from the successful fits as the reconstructed values
+        scale_factor_reconstructed = np.mean(np.sqrt(reco_scale_factor_sq_fit_successful))
+        scale_factor_err = np.std(np.sqrt(reco_scale_factor_sq_fit_successful))
+        
+        if not self.no_core_fit:
+            core_x_reconstructed = np.mean(reco_core_x_fit_successful)
+            core_y_reconstructed = np.mean(reco_core_y_fit_successful)
+            core_x_err = np.std(reco_core_x_fit_successful)
+            core_y_err = np.std(reco_core_y_fit_successful)
+        else:
+            core_x_reconstructed = core_guess[0]
+            core_y_reconstructed = core_guess[1]
+            core_x_err = 0.0
+            core_y_err = 0.0
+            
+        core_reconstructed = np.array([core_x_reconstructed, core_y_reconstructed, data_event.get_first_sim_shower().get_parameter(shp.observation_level)])
+        
+        
+        # store the reconstructed Xmax in the event
+        shower = self._get_or_create_radio_shower(data_event)
+        shower.set_parameter(shp.shower_maximum, xmax_reconstructed * (units.g / units.cm**2))  # convert back to internal units
+        shower.set_parameter(shp.core, core_reconstructed)
+        shower.set_parameter_error(shp.core, np.array([core_x_err, core_y_err, 0.0]))
+        
+        shower.set_parameter(shp.fluence_reco_scale_factor, scale_factor_reconstructed)
+        shower.set_parameter_error(shp.fluence_reco_scale_factor, scale_factor_err)
+        
+        self.logger.info(
+            f"Reconstructed Xmax: {xmax_reconstructed:.2f} g/cm^2, core: ({core_x_reconstructed / units.m:.2f} m, {core_y_reconstructed / units.m:.2f}) m, scale factor: {scale_factor_reconstructed:.2f}"
+        )
+        
+        fit_results = {
+            "xmax_reconstructed": xmax_reconstructed,
+            "core_x_reconstructed": core_x_reconstructed,
+            "core_y_reconstructed": core_y_reconstructed,
+            "core_x_err": core_x_err,
+            "core_y_err": core_y_err,
+            "scale_factor_reconstructed": scale_factor_reconstructed,
+            "scale_factor_err": scale_factor_err,
+            "fit_converged": fit_converged,
+            "mc_xmax": mc_xmax,
+            "mc_core_x": mc_core[0] if mc_core is not None else None,
+            "mc_core_y": mc_core[1] if mc_core is not None else None,
+            "parabola_fit_param": parabola_fit_param,
+        }
+        
+        # write the fit results to a text file
+        self.write_to_file(fit_results, data_event.get_id())
+        
+        return data_event
+    
+    def write_to_file(self, fit_results, event_id):
+        """
+        Write the fit results to a text file.
+
+        Parameters
+        ----------
+        fit_results : dict
+            The fit results to be written to the file.
+        event_id : str
+            The ID of the event being processed.
+        """
+
+        output_file = os.path.join(
+            self.__settings['output_directory'], f"fluence_reco_results_event_{event_id}.hdf5"
+        )
+        
+        with h5py.File(output_file, "w") as f:
+            for key, value in fit_results.items():
+                f.create_dataset(key, data=value)
+        
+        self.logger.info(f"Fit results written to {output_file}")
+        
 
     def end(self):
         """

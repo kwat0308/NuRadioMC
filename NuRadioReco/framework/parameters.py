@@ -161,6 +161,8 @@ class showerParameters(Enum):
     interferometric_shower_maximum = 120  #: depth of the maximum of the longitudinal profile of the beam-formed signal
     interferometric_shower_axis = 121  #: shower axis (direction) derived from beam-formed signal
     interferometric_core = 122  #: core (intersection of shower axis with obs plane) derived from beam-formed signal
+    
+    fluence_reco_scale_factor = 130 #: scale factor of the fluence reconstruction
 
 
 class emitterParameters(Enum):
